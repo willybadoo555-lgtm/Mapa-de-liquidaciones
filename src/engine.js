@@ -455,6 +455,50 @@ function clusters(arr, grid, px, below, smax) {
 
 function groupKey(t, g) { const d = new Date(t); if (g === 'week') { d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7); return utcDate(d.getTime()); } return utcDate(t).slice(0, 8) + '01'; }
 
+
+// Apaga franjas ya barridas por el precio: longs (abajo) si low <= nivel; shorts (arriba) si high >= nivel.
+// El modelo ya lo hace barra a barra (con posibles rellenos). Esto se aplica a instantáneas (CoinGlass, Hyperliquid).
+function wickExtrema(cs, px) {
+  let maxH = -Infinity, minL = Infinity;
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i]; if (!c || !c[0]) continue;
+    let h = c[0][1], l = c[0][2];
+    if (i === cs.length - 1 && px > 0) { h = Math.max(h, px); l = Math.min(l, px); }
+    if (h > 0) maxH = Math.max(maxH, h);
+    if (l > 0) minL = Math.min(minL, l);
+  }
+  return { maxH, minL };
+}
+function firstCrossByRow(R, C, lo, lr, cs, px) {
+  const firstL = new Int32Array(R).fill(C), firstS = new Int32Array(R).fill(C);
+  for (let i = 0; i < C; i++) {
+    const c = cs[i]; if (!c || !c[0]) continue;
+    let h = c[0][1], l = c[0][2];
+    if (i === C - 1 && px > 0) { h = Math.max(h, px); l = Math.min(l, px); }
+    if (!(h > 0) || !(l > 0)) continue;
+    for (let r = 0; r < R; r++) {
+      const p = lo * Math.exp((r + 0.5) / R * lr);
+      if (firstL[r] === C && l <= p) firstL[r] = i;
+      if (firstS[r] === C && h >= p) firstS[r] = i;
+    }
+  }
+  return { firstL, firstS };
+}
+function consumeFromCross(ZL, ZS, R, C, firstL, firstS) {
+  for (let r = 0; r < R; r++) {
+    for (let j = firstL[r]; j < C; j++) ZL[r * C + j] = 0;
+    for (let j = firstS[r]; j < C; j++) ZS[r * C + j] = 0;
+  }
+}
+function consumeProfile(arrL, arrS, N, lo, lr, maxH, minL) {
+  if (!(maxH > 0) || !(minL > 0)) return;
+  for (let r = 0; r < N; r++) {
+    const p = lo * Math.exp((r + 0.5) / N * lr);
+    if (minL <= p) arrL[r] = 0;
+    if (maxH >= p) arrS[r] = 0;
+  }
+}
+
 // exporta una temporalidad directamente al formato compacto de la UI (export + tf_payload de Python)
 function payload(f, sim, ctx) {
   const derived = f === '1W' || f === '1M', base = derived ? '1D' : f, bfr = FRAMES[base];
@@ -499,10 +543,11 @@ function payload(f, sim, ctx) {
   for (let j = 0; j < grid.length; j++) { const r = prow(grid[j]); if (r < 0 || r >= NP) continue; P.model[0][r] += last.L[j] / 1e6; P.model[1][r] += last.S[j] / 1e6; }
   const cgn = new Map(), cg = ctx.cg;
   const cgAgeH = cg && cg.ok ? (Date.now() - cg.ts) / 3600000 : 99, cgw = cg && cg.ok ? cgWeight(cgAgeH) : 0;
+  const snapL = new Float64Array(R * C), snapS = new Float64Array(R * C);
   if (cg && cg.ok && Array.isArray(cg.g) && cgw > 0) {
     let i0 = tS.findIndex((t) => t >= cg.ts / 1000); if (i0 < 0) i0 = C; i0 = Math.min(i0, snap0);
     for (const g of cg.g) {
-      const side = g[0] ? 1 : 0, Z = side ? ZS : ZL; const rs = [];
+      const side = g[0] ? 1 : 0, Z = side ? snapS : snapL; const rs = [];
       for (let r = Math.max(row(g[4]), 0); r <= Math.min(row(g[5]), R - 1); r++) rs.push(r);
       if (!rs.length) { const r = row(g[1]); if (r >= 0 && r < R) rs.push(r); }
       for (const r of rs) for (let i = i0; i < C; i++) Z[r * C + i] += W_CG * cgw * g[3] / rs.length;
@@ -511,7 +556,7 @@ function payload(f, sim, ctx) {
   }
   for (const [szi, liq, val] of ctx.hl) {
     const side = szi > 0 ? 0 : 1, v = W_HL * val / 1e6, r = row(liq), pr = prow(liq);
-    if (r >= 0 && r < R) for (let i = snap0; i < C; i++) (side ? ZS : ZL)[r * C + i] += v;
+    if (r >= 0 && r < R) for (let i = snap0; i < C; i++) (side ? snapS : snapL)[r * C + i] += v;
     if (pr >= 0 && pr < NP) P.hl[side][pr] += v;
   }
   if (!derived) {
@@ -522,6 +567,25 @@ function payload(f, sim, ctx) {
       if (t >= tRecent) { const pr = prow(p); if (pr >= 0 && pr < NP) P.lq[side][pr] += v; }
     }
   }
+  const { firstL, firstS } = firstCrossByRow(R, C, lo, lr, cs, px);
+  consumeFromCross(snapL, snapS, R, C, firstL, firstS);
+  for (let k = 0; k < R * C; k++) { ZL[k] += snapL[k]; ZS[k] += snapS[k]; }
+  // última vela (y precio en vivo): el modelo de esa barra también se apaga si la mecha la cruza
+  if (C) {
+    const lastI = C - 1, c = cs[lastI];
+    if (c && c[0]) {
+      let h = c[0][1], l = c[0][2];
+      if (px > 0) { h = Math.max(h, px); l = Math.min(l, px); }
+      for (let r = 0; r < R; r++) {
+        const p = lo * Math.exp((r + 0.5) / R * lr);
+        if (l <= p) ZL[r * C + lastI] = 0;
+        if (h >= p) ZS[r * C + lastI] = 0;
+      }
+    }
+  }
+  const { maxH, minL } = wickExtrema(cs, px);
+  consumeProfile(P.cg[0], P.cg[1], NP, lo, lr, maxH, minL);
+  consumeProfile(P.hl[0], P.hl[1], NP, lo, lr, maxH, minL);
   const nz = []; for (const Z of [ZL, ZS]) for (const v of Z) if (v > 0) nz.push(v);
   const zmax = nz.length ? percentile(nz, 98.5) : 1;
   const lev = (Z) => Array.from(Z, (z) => z > 0 ? Math.max(0, Math.min(LV, Math.ceil(Math.pow(Math.min(1, z / zmax), GAMMA) * LV - 0.3))) : 0);
