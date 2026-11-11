@@ -82,6 +82,28 @@ function fmtT(t: number, tf: string, long = false) {
   return long ? `${D}/${M}/${Y} ${h}:${m}` : (h === "00" && m === "00" ? `${D}/${M}` : `${D}/${M} ${h}:${m}`);
 }
 const valM = (lv: number, zm: number) => (lv ? Math.pow(lv / LV, 1 / GAM) * zm : 0);
+
+function lastWick(X: any) {
+  let h = -Infinity, l = Infinity;
+  // X puede ser el payload crudo (QuickRead) o el decodificado (el gráfico, con H/Lo)
+  if (X && X.H && X.Lo && X.C) {
+    const i = X.C - 1;
+    if (X.H[i] > 0) h = X.H[i];
+    if (X.Lo[i] > 0) l = X.Lo[i];
+  }
+  if (DATA && DATA.px > 0) { h = Math.max(h === -Infinity ? DATA.px : h, DATA.px); l = Math.min(l === Infinity ? DATA.px : l, DATA.px); }
+  return { h, l };
+}
+function zoneAlive(side: number, p: number, w: { h: number; l: number }) { return side ? w.h < p : w.l > p; }
+function applyLastWickCell(l: number, sv: number, X: any, r: number, i: number) {
+  if (i !== X.C - 1) return [l, sv] as const;
+  const p = X.lo * Math.exp((r + 0.5) / X.R * X.lr);
+  const w = lastWick(X);
+  if (w.l <= p) l = 0;
+  if (w.h >= p) sv = 0;
+  return [l, sv] as const;
+}
+
 function niceStep(span: number, n: number) {
   const raw = span / n, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
   return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
@@ -137,6 +159,7 @@ function Chart({ tf, thr, zonas }: { tf: string; thr: number; zonas: boolean }) 
       const yA = Math.round(y0), hh = Math.max(1, Math.round(y1) - yA);
       for (let i = i0; i <= i1; i++) {
         const k = r * C + i; let l = X.L[k], sv = X.S[k];
+        [l, sv] = applyLastWickCell(l, sv, X, r, i);
         if (l < thrv) l = 0; if (sv < thrv) sv = 0;
         if (!l && !sv) continue;
         const x = Math.round((i - a) * cw), wx = Math.max(1, Math.round((i + 1 - a) * cw) - x);
@@ -161,7 +184,8 @@ function Chart({ tf, thr, zonas }: { tf: string; thr: number; zonas: boolean }) 
       if (bwr >= 3) { ctx.strokeStyle = "rgba(0,0,0,.9)"; ctx.strokeRect(bx - 0.5, by - 0.5, bwr + 1, bh + 1); }
     }
     // las 3 zonas más fuertes por lado del mapa unificado: línea punteada + etiqueta simple
-    const tags: any[] = opts.current.zonas ? X.zu.map((z: any[]) => ({ side: z[0], p: z[1], m: z[2], n: z[3], src: z[4], d: z[5] })) : [];
+    const wick = lastWick(X);
+    const tags: any[] = opts.current.zonas ? X.zu.map((z: any[]) => ({ side: z[0], p: z[1], m: z[2], n: z[3], src: z[4], d: z[5] })).filter((t: any) => zoneAlive(t.side, t.p, wick)) : [];
     for (const t of tags) { t.y0 = yOf(t.p); t.y = t.y0; }
     const vis = tags.filter((t) => t.y0 > 6 && t.y0 < ph - 6).sort((p, q) => p.y0 - q.y0);
     for (let k = 1; k < vis.length; k++) if (vis[k].y < vis[k - 1].y + 17) vis[k].y = vis[k - 1].y + 17;
@@ -219,7 +243,8 @@ function Chart({ tf, thr, zonas }: { tf: string; thr: number; zonas: boolean }) 
     if (!(cr && ci >= 0)) { tp.style.display = "none"; return; }
     const r = Math.floor((Math.log(pr / X.lo) / X.lr) * R);
     const ok = r >= 0 && r < R, k = r * C + ci;
-    const vl = ok ? X.L[k] : 0, vs = ok ? X.S[k] : 0;
+    let vl = ok ? X.L[k] : 0, vs = ok ? X.S[k] : 0;
+    if (ok) [vl, vs] = applyLastWickCell(vl, vs, X, r, ci);
     const dist = (pr / DATA.px - 1) * 100;
     const lines: [string, string][] = [];
     const sg = dist > 0 ? "+" : "";
@@ -350,7 +375,8 @@ const panel = { background: BG, color: "#e6edf3", border: "1px solid #30363d", b
 
 function QuickRead({ X, tf }: { X: any; tf: string }) {
   const dec = DATA.px < 100 ? 2 : 0;
-  const zs = X.zu.map((z: any[]) => ({ side: z[0], p: z[1], m: z[2], n: z[3], d: z[5] }));
+  const wickQ = lastWick(X);
+  const zs = X.zu.map((z: any[]) => ({ side: z[0], p: z[1], m: z[2], n: z[3], d: z[5] })).filter((z: any) => zoneAlive(z.side, z.p, wickQ));
   const up = zs.filter((z: any) => z.side === 1).sort((a: any, b: any) => a.d - b.d)[0];
   const dn = zs.filter((z: any) => z.side === 0).sort((a: any, b: any) => b.d - a.d)[0];
   const f = (z: any) => `${fmtN(z.p, dec)} $ (${z.d > 0 ? "+" : ""}${fmtN(z.d, 1)} %, ~${fmtN(z.m, 0)} M$, ${z.n} fuente${z.n === 1 ? "" : "s"})`;

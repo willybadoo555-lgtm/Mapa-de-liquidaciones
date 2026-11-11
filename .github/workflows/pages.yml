@@ -15,9 +15,13 @@ permissions:
   pages: write
   id-token: write
 
+# Grupo distinto del original (pages-${{ github.ref }}). Esos runs del 11 nov 2026
+# se quedaron en cola sin jobs y, con cancel-in-progress, retienen el grupo:
+# los siguientes (cron incluido) no arrancan. Aquí no se cancela en curso, así
+# un run atascado del grupo viejo no bloquea este.
 concurrency:
-  group: pages-${{ github.ref }}
-  cancel-in-progress: true
+  group: pages-v2-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
