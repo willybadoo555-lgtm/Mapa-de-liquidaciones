@@ -28,10 +28,11 @@ const OKX_OI_PERIOD = OKX_BAR;
 const BYBIT_IV = { '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1D': 'D' };
 const BITGET_BAR = { '5m': '5m', '15m': '15m', '1h': '1H', '4h': '4H', '1D': '1D' };
 
+export const CG_FRESH_H = 1, CG_FADE_END_H = 6;
 export function cgWeight(ageH) {
   if (!(ageH >= 0)) return 0;
-  if (ageH <= 3.75) return 1;
-  return Math.max(0, 1 - (ageH - 3.75) / (10 - 3.75));
+  if (ageH <= CG_FRESH_H) return 1;
+  return Math.max(0, 1 - (ageH - CG_FRESH_H) / (CG_FADE_END_H - CG_FRESH_H));
 }
 function errText(e) { return String((e && (e.message || e)) || 'error').replace(/\s+/g, ' ').slice(0, 180); }
 async function getAny(get, urls) {
@@ -373,6 +374,82 @@ async function fetchOkxLiqs(get, ok, fail) {
   } catch (e) { fail.okx_liquidations = String(e.message || e).slice(0, 80); return []; }
 }
 
+
+async function fetchBooks(get, ok, fail) {
+  const S = SYM, out = { levels: [], ok: [], fail: {}, span: {} };
+  const et = (typeof errText === 'function') ? errText : (e) => String((e && (e.message || e)) || 'error').replace(/\s+/g, ' ').slice(0, 180);
+  const binH = (typeof BINANCE_HOSTS !== 'undefined' && BINANCE_HOSTS) ? BINANCE_HOSTS : ['https://fapi.binance.com'];
+  const byH = (typeof BYBIT_HOSTS !== 'undefined' && BYBIT_HOSTS) ? BYBIT_HOSTS : ['https://api.bybit.com'];
+  const job = async (name, fn) => {
+    try {
+      const r = await fn();
+      const bids = r.bids || [], asks = r.asks || [];
+      if (!bids.length && !asks.length) throw new Error('libro vacío');
+      const usd = (p, q) => r.ct ? p * q * r.ct : p * q;
+      const mid = (bids.length && asks.length) ? (+bids[0][0] + +asks[0][0]) / 2 : +(bids[0] || asks[0])[0];
+      let n = 0;
+      for (const [side, rows] of [[0, bids], [1, asks]]) {
+        for (const row of rows) {
+          const p = +row[0], q = +row[1], u = usd(p, q);
+          if (!(p > 0) || !(u > 0)) continue;
+          out.levels.push({ ex: name, side, p, usd: u });
+          n++;
+        }
+      }
+      const lo = bids.length ? Math.min(...bids.map((x) => +x[0])) : mid;
+      const hi = asks.length ? Math.max(...asks.map((x) => +x[0])) : mid;
+      out.span[name] = { bid_pct: mid ? Math.round((mid - lo) / mid * 10000) / 100 : 0, ask_pct: mid ? Math.round((hi - mid) / mid * 10000) / 100 : 0, n };
+      if (!n) throw new Error('sin niveles utilizables');
+      out.ok.push(name);
+      ok.add('libro_' + name);
+    } catch (e) {
+      const m = et(e);
+      fail['libro_' + name] = m.slice(0, 80);
+      out.fail[name] = m.slice(0, 80);
+    }
+  };
+  await Promise.all([
+    job('binance', async () => {
+      const errs = [];
+      for (const B of binH) {
+        try {
+          const d = await get(`${B}/fapi/v1/depth?symbol=${S.binance}&limit=1000`);
+          if (!d || !d.bids) throw new Error('sin libro');
+          return { bids: d.bids, asks: d.asks };
+        } catch (e) { errs.push(et(e)); }
+      }
+      throw new Error(errs.find((m) => /451|403|CORS/i.test(m)) || errs[errs.length - 1] || 'sin respuesta');
+    }),
+    job('bybit', async () => {
+      const errs = [];
+      for (const B of byH) {
+        try {
+          const d = await get(`${B}/v5/market/orderbook?category=linear&symbol=${S.bybit}&limit=1000`);
+          const r = d && d.result;
+          if (!r || !(r.b || []).length) throw new Error('sin libro');
+          return { bids: r.b, asks: r.a };
+        } catch (e) { errs.push(et(e)); }
+      }
+      throw new Error(errs.find((m) => /451|403|CORS/i.test(m)) || errs[errs.length - 1] || 'sin respuesta');
+    }),
+    job('okx', async () => {
+      let x = null;
+      try {
+        const d = await get(`https://www.okx.com/api/v5/market/books-full?instId=${S.okx_inst}&sz=5000`);
+        x = d && d.data && d.data[0];
+        if (!x || !(x.bids || []).length || x.bids.length < 10) x = null;
+      } catch (_) { x = null; }
+      if (!x) {
+        const d = await get(`https://www.okx.com/api/v5/market/books?instId=${S.okx_inst}&sz=400`);
+        x = d && d.data && d.data[0];
+      }
+      if (!x || !(x.bids || []).length) throw new Error('sin libro');
+      return { bids: x.bids, asks: x.asks, ct: 0.01 };
+    }),
+  ]);
+  return out;
+}
+
 // ---------------------------------------------------------------- modelo (idéntico a liqmap/model.py)
 function barBasis(f, K, KF) {
   const ts = [...K.keys()].sort((a, b) => a - b), both = ts.filter((t) => KF.has(t) && K.get(t)[3] && KF.get(t)[3]);
@@ -536,10 +613,10 @@ function payload(f, sim, ctx) {
   const cd = cs.map((c) => !c ? '~~~~~~~~' : c[0].map(q12).join('')).join('');
   const subI = cs.map((c, i) => (c && c[1] ? i : -1)).filter((i) => i >= 0);
   const tS = cols.map((c) => Math.floor(c.t / 1000)), step = C > 1 ? (tS[C - 1] - tS[0]) / (C - 1) : 0;
-  // ---- MAPA UNIFICADO (igual que build_canvas.py): modelo ×1 + CoinGlass combinado ×0,5 + Hyperliquid ×1 + liquidaciones reales ×1, en M$ y precio PF_XBTUSD
-  const W_CG = 0.5, W_HL = 1, W_LQ = 1, SNAP = 3, snap0 = Math.max(0, C - SNAP);
+  // ---- MAPA UNIFICADO (igual que build_canvas.py): modelo ×1 + CoinGlass combinado ×1 + Hyperliquid ×1 + liquidaciones reales ×1 + libro de órdenes ×0,3, en M$ y precio PF_XBTUSD
+  const W_CG = 1, W_HL = 1, W_LQ = 1, SNAP = 3, snap0 = Math.max(0, C - SNAP);
   const NP = 4 * R, prow = (p) => p > 0 ? Math.floor(Math.log(p / lo) / lr * NP) : -1, row = (p) => p > 0 ? Math.floor(Math.log(p / lo) / lr * R) : -1;
-  const P = { model: [new Float64Array(NP), new Float64Array(NP)], cg: [new Float64Array(NP), new Float64Array(NP)], hl: [new Float64Array(NP), new Float64Array(NP)], lq: [new Float64Array(NP), new Float64Array(NP)] };
+  const P = { model: [new Float64Array(NP), new Float64Array(NP)], cg: [new Float64Array(NP), new Float64Array(NP)], hl: [new Float64Array(NP), new Float64Array(NP)], lq: [new Float64Array(NP), new Float64Array(NP)], ob: [new Float64Array(NP), new Float64Array(NP)] };
   for (let j = 0; j < grid.length; j++) { const r = prow(grid[j]); if (r < 0 || r >= NP) continue; P.model[0][r] += last.L[j] / 1e6; P.model[1][r] += last.S[j] / 1e6; }
   const cgn = new Map(), cg = ctx.cg;
   const cgAgeH = cg && cg.ok ? (Date.now() - cg.ts) / 3600000 : 99, cgw = cg && cg.ok ? cgWeight(cgAgeH) : 0;
@@ -586,6 +663,15 @@ function payload(f, sim, ctx) {
   const { maxH, minL } = wickExtrema(cs, px);
   consumeProfile(P.cg[0], P.cg[1], NP, lo, lr, maxH, minL);
   consumeProfile(P.hl[0], P.hl[1], NP, lo, lr, maxH, minL);
+  // Libro de órdenes (instantánea actual): no se apaga con mechas históricas.
+  P.ob = [new Float64Array(NP), new Float64Array(NP)];
+  if (ctx.ob && ctx.ob.length) {
+    for (const lv of ctx.ob) {
+      const v = 0.3 * lv.usd / 1e6, r = row(lv.p), pr = prow(lv.p);
+      if (r >= 0 && r < R) for (let i = snap0; i < C; i++) (lv.side ? ZS : ZL)[r * C + i] += v;
+      if (pr >= 0 && pr < NP) P.ob[lv.side][pr] += v;
+    }
+  }
   const nz = []; for (const Z of [ZL, ZS]) for (const v of Z) if (v > 0) nz.push(v);
   const zmax = nz.length ? percentile(nz, 98.5) : 1;
   const lev = (Z) => Array.from(Z, (z) => z > 0 ? Math.max(0, Math.min(LV, Math.ceil(Math.pow(Math.min(1, z / zmax), GAMMA) * LV - 0.3))) : 0);
@@ -601,7 +687,7 @@ function payload(f, sim, ctx) {
     for (const r of cand) {
       if (pick.length && !pick.every((q) => Math.abs(r - q) > 2 * join)) continue;
       const a = Math.max(0, r - join), b = Math.min(NP, r + join + 1), tot = sm[r], src = [];
-      for (const [k, labl] of [['model', 'modelo'], ['cg', 'CoinGlass'], ['hl', 'Hyperliquid'], ['lq', 'liq. reales']]) {
+      for (const [k, labl] of [['model', 'modelo'], ['cg', 'CoinGlass'], ['hl', 'Hyperliquid'], ['lq', 'liq. reales'], ['ob', 'libro de órdenes']]) {
         let v = 0; for (let q = a; q < b; q++) v += P[k][side][q];
         if (v > 0.5 && v >= 0.05 * tot) {
           let lab = labl; if (k === 'cg') { let n = 0; for (let q = a; q < b; q++) n = Math.max(n, cgn.get(side + '|' + q) || 0); if (n) lab = `CoinGlass ${n}/${cg.nt || n} exch`; }
@@ -636,8 +722,8 @@ export async function runEngine({ http, hlTop, store, cgSeed, wsLiqs = [], onPro
     const doSlow = !only && (!prevSlow || now - prevSlow.ts > slowEveryMin * 60000 || !(await store.get('c3:1D')));
     const frames = only ? only.slice() : doSlow ? ['5m', '15m', '1h', '4h', '1D'] : ['5m', '15m', '1h', '4h'];
     const caches = {};
-    const [{ live, px }, hl, okxL] = await Promise.all([
-      fetchLive(get, ok, fail), fetchHL(get, hlTop, store, ok, fail, hlMaxAgeMin), fetchOkxLiqs(get, ok, fail),
+    const [{ live, px }, hl, okxL, books] = await Promise.all([
+      fetchLive(get, ok, fail), fetchHL(get, hlTop, store, ok, fail, hlMaxAgeMin), fetchOkxLiqs(get, ok, fail), fetchBooks(get, ok, fail),
       ...frames.map(async (f) => { caches[f] = await fetchFrame(get, f, await loadCache(store, f), now, ok, fail); })]);
     for (const f of frames) await saveCache(store, f, caches[f]);
     // precio de referencia: Kraken Futures PF_XBTUSD
@@ -660,7 +746,35 @@ export async function runEngine({ http, hlTop, store, cgSeed, wsLiqs = [], onPro
     if (wsLiqs.length || liqs.some((l) => l[0] !== 'okx')) ok.add('ws_liquidations (Binance/Bybit, solo con la app abierta)');
     const liqsK = liqs.map(([ex, t, sd, p, u]) => [ex, t, sd, p / (1 + pctAt(ex, t)), u]);
     const hlK = hl.pos.map(([szi, liq, val]) => [szi, liq / (1 + (basisNow.hyperliquid || 0)), val]);
-    const ctx = { px: pxNow, liqs: liqsK, hl: hlK, cg: cgSeed };
+    const OB_SPAN = 0.10, obK = [], obOk = [], NAMES_OB = { binance: 'Binance', bybit: 'Bybit', okx: 'OKX' };
+    for (const name of books.ok) {
+      if (basisNow[name] == null) { fail['libro_' + name] = 'sin basis frente a PF_XBTUSD; no se ajusta ni se inventa'; books.fail[name] = fail['libro_' + name]; continue; }
+      obOk.push(name);
+    }
+    const obOkSet = new Set(obOk);
+    for (const lv of books.levels) {
+      if (!obOkSet.has(lv.ex)) continue;
+      const q = lv.p / (1 + basisNow[lv.ex]);
+      if (!(q > 0) || Math.abs(q / pxNow - 1) > OB_SPAN) continue;
+      obK.push({ ex: lv.ex, side: lv.side, p: q, usd: lv.usd });
+    }
+    if (obOk.length) {
+      const bits = obOk.map((ex) => {
+        const sp = books.span[ex] || {};
+        return `${NAMES_OB[ex] || ex} −${sp.bid_pct ?? '?'} %/+${sp.ask_pct ?? '?'} %`;
+      });
+      notes.push('Libro de órdenes (APIs públicas, no cubren ±5–10 %): ' + bits.join(', ') + '.');
+      ok.add('libro_ordenes (' + obOk.map((x) => NAMES_OB[x] || x).join(', ') + ', ×0,3)');
+    } else if (Object.keys(books.fail).length) {
+      notes.push('Libro de órdenes: ninguna de Binance/OKX/Bybit se pudo usar en esta pasada.');
+    }
+    const ctx = { px: pxNow, liqs: liqsK, hl: hlK, cg: cgSeed, ob: obK };
+    const obHead = {
+      ok: obOk.map((x) => NAMES_OB[x] || x),
+      fail: Object.entries(books.fail).map(([k, v]) => [NAMES_OB[k] || k, v]),
+      span: Object.entries(books.span).map(([k, v]) => [NAMES_OB[k] || k, v.bid_pct, v.ask_pct]),
+      w: 0.3,
+    };
     const tf = {}, errs = {};
     for (const f of frames) {
       try {
@@ -677,8 +791,8 @@ export async function runEngine({ http, hlTop, store, cgSeed, wsLiqs = [], onPro
     if (cgSeed && cgSeed.ok) {
       const age = (now - cgSeed.ts) / 3600000;
       cgw = cgWeight(age);
-      if (age > 10) fail.coinglass_web = `desactualizado: lectura de ${cgSeed.at} (hace ${age.toFixed(1)} h); fuera del mapa`;
-      else if (age > 3.75) fail.coinglass_web = `desactualizado: lectura de ${cgSeed.at} (hace ${age.toFixed(1)} h; peso ${(cgw * 100).toFixed(0)} %)`;
+      if (age > CG_FADE_END_H) fail.coinglass_web = `desactualizado: lectura de ${cgSeed.at} (hace ${age.toFixed(1)} h); fuera del mapa`;
+      else if (age > CG_FRESH_H) { fail.coinglass_web = `lectura de ${cgSeed.at} (hace ${age.toFixed(1)} h; peso ${(cgw * 100).toFixed(0)} %)`; okL.push(`coinglass_web (fichero del repo, ${cgSeed.at}, peso ${(cgw * 100).toFixed(0)} %)`); }
       else okL.push(`coinglass_web (fichero del repo, ${cgSeed.at})`);
     } else if (cgSeed && cgSeed.err) fail.coinglass_web = String(cgSeed.err).slice(0, 160);
     const alts = [...new Set(frames.map((f) => caches[f] && caches[f].kl_src).filter((s) => s && s !== 'binance'))];
@@ -686,7 +800,7 @@ export async function runEngine({ http, hlTop, store, cgSeed, wsLiqs = [], onPro
     const head = {
       sym: ACTIVE, kf: SYM.kf, px: pxNow, upd: can(now), ts: now, lv: LV, ok: okL.join(', '), fail, oi: Math.round(Object.values(live).reduce((a, b) => a + b, 0)), hln: hl.n,
       notes, basis: Object.keys(basisNow).length ? { ref: `${SYM.kf} (last)`, at: can(now), ex: Object.entries(basisNow).sort().map(([ex, v]) => [EXNAMES[ex], r1(-v * px.kraken_futures), r1(v * 100, 4)]), bar: (tf['1h'] || (prev && prev.tf && prev.tf['1h']) || { bb: null }).bb } : null,
-      cg: cgSeed || null, cgw, nreq: stats.req, tf: {},
+      cg: cgSeed || null, cgw, ob: obHead, nreq: stats.req, tf: {},
     };
     for (const f of ['5m', '15m', '1h', '4h']) if (tf[f]) head.tf[f] = tf[f]; else if (prev && prev.tf && prev.tf[f]) head.tf[f] = prev.tf[f];
     head.part = only ? only.join('/') : null; head.hlts = hl.ts || null;

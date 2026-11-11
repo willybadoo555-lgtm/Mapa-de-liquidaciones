@@ -66,6 +66,8 @@ console.log('OK:', r.DATA.ok);
 console.log('FAIL:', JSON.stringify(r.DATA.fail));
 console.log('NOTAS:', (r.DATA.notes || []).join(' | ') || '—');
 if (r.DATA.basis) console.log('basis', JSON.stringify(r.DATA.basis.ex));
+const ob = r.DATA.ob || {};
+console.log('LIBRO ok', (ob.ok || []).join(', ') || '—', '· fail', JSON.stringify(ob.fail || []), '· cobertura', JSON.stringify(ob.span || []));
 for (const [f, row] of Object.entries(tfs)) {
   console.log(f, 'C', row.C, 'R', row.R, 'zm', row.zm, 'kSrc', row.kSrc, 'zonas', (row.zu || []).map((z) => (z[0] ? '↑' : '↓') + z[1] + ' ' + z[2] + 'M$ ' + z[3] + 'f').join(' · '));
 }
@@ -77,6 +79,7 @@ const lines = [
   `- Fallos: ${JSON.stringify(r.DATA.fail)}`,
   `- Notas: ${(r.DATA.notes || []).join(' · ') || '—'}`,
   `- CoinGlass: ${prepared.seed && prepared.seed.ok ? prepared.seed.at + ' peso ' + r.DATA.cgw : (prepared.seed && prepared.seed.err) || 'no'}`,
+  `- Libro: ${(ob.ok || []).join(', ') || 'ninguno'} · ${JSON.stringify(ob.fail || [])}`,
 ];
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
 if (!r.DATA.px || !x || !(x.zm > 0) || !x.C || !String(x.hmL || '').length || !String(x.cd || '').replace(/~/g, '').length) {
