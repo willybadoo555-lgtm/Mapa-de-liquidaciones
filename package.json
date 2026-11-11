@@ -1,0 +1,19 @@
+{
+  "name": "mapa-de-liquidaciones",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs && node scripts/precompute.mjs",
+    "precompute": "node scripts/precompute.mjs",
+    "test:browser": "node scripts/browser-test.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2",
+    "playwright-core": "^1.49.1"
+  }
+}

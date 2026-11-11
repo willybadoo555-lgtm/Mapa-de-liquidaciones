@@ -1,0 +1,56 @@
+# Publica el mapa y, cada 15 min, recalcula data/latest.json en un runner de GitHub (EE. UU.).
+# El cron solo corre cuando este archivo está en la rama por defecto (main).
+name: Publicar mapa
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/cache@v4
+        with:
+          path: data/engine-store.json
+          key: liq-engine-${{ hashFiles('src/engine.js', 'src/coinglass.js') }}-${{ github.run_id }}
+          restore-keys: |
+            liq-engine-${{ hashFiles('src/engine.js', 'src/coinglass.js') }}-
+            liq-engine-
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
