@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Page } from "./shim";
-import { cgWeight } from "./engine.js";
+import { cgWeight, CG_FRESH_H, CG_FADE_END_H } from "./engine.js";
 
 // Datos: bloques de una línea generados por /workspace/liqmap/build_canvas.py / canvas_update.py (no editar a mano)
 let DATA: any = null;
@@ -426,11 +426,17 @@ function Sources({ X }: { X: any }) {
   const cg = CGD, cgAge = cg && cg.ok ? (Date.now() - cg.ts) / 3600000 : 0;
   if (cg && !cg.ok) fails.push(`CoinGlass (${cg.err})`);
   const cgw = cg && cg.ok ? cgWeight(cgAge) : (DATA.cgw == null ? 0 : DATA.cgw);
-  if (cg && cg.ok && cgAge > 3.75) fails.push(cgw > 0 ? `CoinGlass desactualizado (lectura de hace ${fmtN(cgAge, 1)} h): peso reducido al ${fmtN(cgw * 100, 0)} %` : `CoinGlass desactualizado (hace ${fmtN(cgAge, 1)} h): fuera del mapa hasta la próxima lectura`);
+  if (cg && cg.ok && cgAge > CG_FADE_END_H) fails.push(`CoinGlass desactualizado (hace ${fmtN(cgAge, 1)} h): fuera del mapa hasta la próxima lectura`);
+  else if (cg && cg.ok && cgAge > CG_FRESH_H) fails.push(`CoinGlass (lectura de hace ${fmtN(cgAge, 1)} h): peso reducido al ${fmtN(cgw * 100, 0)} %`);
+  const ob = DATA.ob || {};
+  const obSpan = (ob.span || []).map((s: any[]) => `${s[0]} −${s[1]} %/+${s[2]} %`).join(", ");
+  const obTxt = (ob.ok || []).length
+    ? ` + libro de órdenes ${(ob.ok || []).join("/")} (×0,3, liquidez actual del book público${obSpan ? `, cobertura ${obSpan}` : ""}; no llega a ±5–10 % con las APIs públicas)`
+    : " + libro de órdenes Binance/OKX/Bybit (×0,3; no disponible en esta pasada)";
   return (
     <div id="fuentes" style={{ fontSize: 11, color: "#8b949e", lineHeight: 1.5, marginTop: 6 }}>
-      <div><b style={{ color: "#f59e0b" }}>ESTIMADO</b> · Mapa unificado en M$: modelo propio de OI y apalancamiento (×{1}) + CoinGlass combinado (×0,5{cg && cg.ok ? `${cgw < 1 ? ` × ${fmtN(cgw, 2)} por antigüedad` : ""}, ${cg.ex.length} exch, leído ${cg.at}` : ""}) + posiciones reales de Hyperliquid (×1) + liquidaciones reales (×1); donde coinciden, se suman y sale más intenso. Las fuentes «de ahora» (CoinGlass, Hyperliquid) se pintan en las últimas columnas. Todo en precio {DATA.kf}{DATA.basis ? ` (ajuste: ${DATA.basis.ex.map((e: any[]) => `${e[0]} ${e[1] > 0 ? "+" : e[1] < 0 ? "−" : ""}${fmtN(Math.abs(e[1]), 0)} $`).join(", ")})` : ""}. Velas {DATA.kf} verdes/rojas{X.ns ? ` (apagadas = sustitutas ${X.kSrc || "Binance"})` : ""}.</div>
-      <div>Fuentes OK: {DATA.ok}{cg && cg.ok && cgAge <= 3.75 ? " · CoinGlass" : ""}</div>
+      <div><b style={{ color: "#f59e0b" }}>ESTIMADO</b> · Mapa unificado en M$: modelo propio de OI y apalancamiento (×1) + CoinGlass combinado (×1{cg && cg.ok ? `${cgw < 1 ? ` × ${fmtN(cgw, 2)} por antigüedad` : ""}, ${cg.ex.length} exch, leído ${cg.at}` : ""}) + posiciones reales de Hyperliquid (×1) + liquidaciones reales (×1){obTxt}; donde coinciden, se suman y sale más intenso. Las fuentes «de ahora» (CoinGlass, Hyperliquid, libro de órdenes) se pintan en las últimas columnas. Todo en precio {DATA.kf}{DATA.basis ? ` (ajuste: ${DATA.basis.ex.map((e: any[]) => `${e[0]} ${e[1] > 0 ? "+" : e[1] < 0 ? "−" : ""}${fmtN(Math.abs(e[1]), 0)} $`).join(", ")})` : ""}. Velas {DATA.kf} verdes/rojas{X.ns ? ` (apagadas = sustitutas ${X.kSrc || "Binance"})` : ""}.</div>
+      <div>Fuentes OK: {DATA.ok}{cg && cg.ok && cgAge <= CG_FRESH_H ? " · CoinGlass" : ""}</div>
       {fails.length ? <div style={{ color: "#f0883e" }}>Fallan: {fails.join(" · ")}</div> : null}
       {(DATA.notes || []).length ? <div>⚠ {(DATA.notes || []).join(" · ")}</div> : null}
       <div>Horas de Canarias (1D/1W/1M en UTC). Toque = cruz de lectura (otro toque o ✕ la cierra) · pellizco/rueda = zoom · arrastrar = mover. Solo datos públicos; no es asesoramiento.</div>

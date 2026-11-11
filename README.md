@@ -24,7 +24,7 @@ CoinGlass no se puede descargar desde la web ni desde Actions. Se lee del ficher
 
 Ruta en el repo: **`data/coinglass_latest.json`**. Sustitúyelo (mismo nombre) cuando haya una lectura nueva desde el navegador con sesión; el siguiente cálculo de Actions lo copia al sitio y lo pasa a precio `PF_XBTUSD`. La web no lo pide a CoinGlass.
 
-Peso en el mapa unificado, igual que el motor de la app: peso 1 hasta **3 h 45 min**, luego baja en línea recta hasta **0 a las 10 h**. A partir de 3 h 45 min se marca **desactualizado** (sigue dentro del mapa con menos peso). A las 10 h sale del mapa hasta la próxima lectura. Dentro del mapa, CoinGlass entra con peso ×0,5 por ese factor de antigüedad.
+Peso en el mapa unificado: CoinGlass entra a **×1**. La lectura vale entera hasta **1 h**, luego baja en línea recta hasta **0 a las 6 h**. Entre 1 h y 6 h sigue en el mapa con el peso reducido y se indica en las fuentes. A las 6 h se marca **desactualizado** y sale del mapa hasta la próxima lectura.
 
 ### Esquema v2 (`"schema": "liqmap.coinglass.v2"`)
 
@@ -90,4 +90,4 @@ npm run test:browser   # Chrome sin cabeza contra ese dist
 
 ## Qué suma el mapa
 
-Modelo de open interest y apalancamiento (×1) + CoinGlass combinado (×0,5, y el peso por antigüedad) + posiciones reales de Hyperliquid (×1) + liquidaciones reales de OKX y, si el websocket responde, Binance/Bybit (×1). Todo en millones de USD y en precio `PF_XBTUSD`. Donde coinciden, se suman.
+Modelo de open interest y apalancamiento (×1) + CoinGlass combinado (×1, y el peso por antigüedad) + posiciones reales de Hyperliquid (×1) + liquidaciones reales de OKX y, si el websocket responde, Binance/Bybit (×1) + libro de órdenes público de Binance, OKX y Bybit (×0,3, solo la profundidad que devuelve cada API, como mucho ±10 % del precio). En los runners de Estados Unidos Binance (451) y Bybit (403) se omiten y se listan en Fallan; OKX suele entrar. Todo en millones de USD y en precio `PF_XBTUSD`. Donde coinciden, se suman.
